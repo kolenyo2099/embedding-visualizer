@@ -176,6 +176,8 @@ if 'hf_token' not in st.session_state:
     st.session_state.hf_token = ""
 if 'uploaded_file_id' not in st.session_state:
     st.session_state.uploaded_file_id = None
+if 'uploaded_images_signature' not in st.session_state:
+    st.session_state.uploaded_images_signature = None
 if 'node_size' not in st.session_state:
     st.session_state.node_size = 1.0
 if 'search_result_size_multiplier' not in st.session_state:
@@ -909,8 +911,8 @@ def generate_cosmograph_html(df, search_results=[], search_scores=[], node_size=
 # Title and description
 st.title("🎯 Semantic Embedding Explorer")
 st.markdown("""
-Visualize and explore text data using state-of-the-art embeddings and interactive clustering.
-Upload a CSV, select columns, and explore semantic relationships in your data.
+Visualize and explore text or image data using state-of-the-art embeddings and interactive clustering.
+Upload a CSV, select columns, or experiment with image collections enhanced by optional metadata.
 """)
 
 # Sidebar for configuration
@@ -943,18 +945,21 @@ with st.sidebar.expander("🔑 Hugging Face Authentication", expanded=False):
 system_info = get_system_info()
 with st.sidebar.expander("💻 System Info", expanded=False):
     st.markdown(f"""
-    **Device:** {system_info['device']}  
+    **Device:** {system_info['device']}
     **CPU Cores:** {system_info['cpu_count']}  
     **Memory:** {system_info['memory_gb']}GB total  
     **Available:** {system_info['memory_available_gb']}GB  
     **PyTorch:** {system_info['torch_version']}
     """)
 
-# Step 1: File Upload
-uploaded_file = st.sidebar.file_uploader(
-    "Upload CSV File",
-    type=['csv'],
-    help="Upload a CSV file containing text data"
+# Data modality selection
+modality_options = ["Text", "Image"]
+selected_modality = st.sidebar.radio(
+    "Data Modality",
+    options=modality_options,
+    index=modality_options.index(st.session_state.modality)
+    if st.session_state.modality in modality_options else 0,
+    help="Choose the type of content you want to explore."
 )
 
 if uploaded_file is not None:
@@ -1350,12 +1355,12 @@ if uploaded_file is not None:
                                 model_name,
                                 metadata=metadata_context
                             )
-                            if save_path:
-                                details_text.text(f"Saved to: {save_path.name}")
+                            if saved_path:
+                                save_duration = time.time() - save_start
                                 processing_steps.append({
                                     'step': 'Save Embeddings',
-                                    'time': 0,
-                                    'details': f"Saved to embeddings_cache/{save_path.name}"
+                                    'time': save_duration,
+                                    'details': f"Stored cache {saved_path.name}"
                                 })
 
                     progress_bar.progress(50)
@@ -1435,17 +1440,39 @@ if uploaded_file is not None:
                     
                     step_time = time.time() - step_start
                     processing_steps.append({
-                        'step': 'Dimensionality Reduction',
+                        'step': 'Finalization',
                         'time': step_time,
-                        'details': f"UMAP: {embeddings.shape[1]}D → 2D"
+                        'details': "Data saved to session"
                     })
-                    
-                    progress_bar.progress(90)
-                except Exception as umap_error:
-                    st.error(f"❌ Error during UMAP dimensionality reduction: {str(umap_error)}")
-                    st.error(f"Error type: {type(umap_error).__name__}")
-                    import traceback
-                    st.error(f"Traceback: {traceback.format_exc()}")
+
+                    progress_bar.progress(100)
+                    status_text.text("✅ Processing complete!")
+                    details_text.text(f"Total time: {format_time(total_time)}")
+
+                    st.markdown("### 📊 Processing Summary")
+                    summary_col1, summary_col2, summary_col3 = st.columns(3)
+
+                    with summary_col1:
+                        st.metric("Total Time", format_time(total_time))
+                        st.metric("Data Points", len(df_clean))
+
+                    with summary_col2:
+                        st.metric("Clusters Found", n_clusters_found)
+                        st.metric("Noise Points", noise_points)
+
+                    with summary_col3:
+                        st.metric("Embedding Dim", f"{embeddings.shape[1]}D")
+                        st.metric("Processing Speed", f"{len(df_clean)/total_time:.1f} texts/sec")
+
+                    with st.expander("⏱️ Detailed Timing Breakdown"):
+                        timing_df = pd.DataFrame(processing_steps)
+                        timing_df['percentage'] = (timing_df['time'] / timing_df['time'].sum() * 100).round(1)
+                        timing_df.columns = ['Step', 'Time (seconds)', 'Details', 'Percentage']
+                        timing_df['Time (formatted)'] = timing_df['Time (seconds)'].apply(format_time)
+                        st.dataframe(timing_df[['Step', 'Time (formatted)', 'Percentage', 'Details']],
+                                    use_container_width=True, hide_index=True)
+
+                    time.sleep(3)
                     processing_placeholder.empty()
                     st.stop()
                 
@@ -1953,20 +1980,23 @@ if st.session_state.processed and st.session_state.df is not None:
 
 else:
     # Welcome screen
-    st.info("👆 Upload a CSV file in the sidebar to get started!")
-    
+    st.info("👆 Upload a CSV file or a collection of images in the sidebar to get started!")
+
     with st.expander("ℹ️ How to use this app"):
         st.markdown("""
         ### Step-by-step guide:
-        
-        1. **Upload CSV**: Click "Browse files" in the sidebar and select your CSV file
-        2. **Select Columns**: 
+
+        1. **Choose Modality**: Select **Text** for CSV uploads or **Image** for visual datasets
+        2. **Upload Data**:
+           - For **Text**, click "Browse files" and select your CSV file
+           - For **Image**, choose one or more images and optional metadata (JSON/CSV/TSV)
+        3. **Select Columns** (Text only):
            - Choose which column contains the text to embed
            - Choose which column to use as labels (node titles)
            - Optionally select a URL column for clickable links
-        3. **Configure Clustering**: Choose automatic (HDBSCAN) or fixed (KMeans) clustering
-        4. **Process**: Click the "Process Data" button and wait for completion
-        5. **Explore**: 
+        4. **Configure Clustering**: Choose automatic (HDBSCAN) or fixed (KMeans) clustering
+        5. **Process**: Click the "Process Data" button and wait for completion
+        6. **Explore**:
            - Use **Semantic Search** to find similar nodes
            - View the **Visualization** to explore clusters
            - Check **Data Explorer** for statistics and downloads
