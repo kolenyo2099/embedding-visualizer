@@ -4,8 +4,11 @@ import time
 import os
 import hashlib
 import pickle
+import base64
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO
+
 
 # Robust import handling with error checking
 def check_and_import_dependencies():
@@ -37,18 +40,44 @@ def check_and_import_dependencies():
     except ImportError:
         missing_deps.append("sentence-transformers")
         SentenceTransformer = None
-    
+
     try:
         import umap
     except ImportError:
         missing_deps.append("umap-learn")
         umap = None
-    
+
     try:
         from sklearn.cluster import HDBSCAN
     except ImportError:
         missing_deps.append("scikit-learn")
         HDBSCAN = None
+
+    try:
+        from transformers import (
+            SiglipProcessor,
+            SiglipTextModel,
+            SiglipVisionModel,
+        )
+    except ImportError:
+        missing_deps.append("transformers")
+        SiglipProcessor = None
+        SiglipTextModel = None
+        SiglipVisionModel = None
+
+    try:
+        from torchvision import transforms
+        from torchvision.transforms import InterpolationMode
+    except ImportError:
+        missing_deps.append("torchvision")
+        transforms = None
+        InterpolationMode = None
+
+    try:
+        from PIL import Image
+    except ImportError:
+        missing_deps.append("Pillow")
+        Image = None
     
     # Optional dependencies
     try:
@@ -117,6 +146,13 @@ HDBSCAN = imports['HDBSCAN']
 components = imports['components']
 PSUTIL_AVAILABLE = imports['PSUTIL_AVAILABLE']
 COMPONENTS_AVAILABLE = imports['COMPONENTS_AVAILABLE']
+SiglipProcessor = imports['SiglipProcessor']
+SiglipTextModel = imports['SiglipTextModel']
+SiglipVisionModel = imports['SiglipVisionModel']
+transforms = imports['transforms']
+InterpolationMode = imports['InterpolationMode']
+Image = imports['Image']
+F = torch.nn.functional if torch else None
 
 # Page configuration
 st.set_page_config(
@@ -144,6 +180,8 @@ if 'node_size' not in st.session_state:
     st.session_state.node_size = 1.0
 if 'search_result_size_multiplier' not in st.session_state:
     st.session_state.search_result_size_multiplier = 3.0
+if 'modality' not in st.session_state:
+    st.session_state.modality = 'text'
 
 def get_system_info():
     """Get system information for display"""
@@ -190,24 +228,254 @@ def format_memory(mb):
     else:
         return f"{mb/1024:.1f}GB"
 
+def get_torch_device():
+    """Determine the best available Torch device"""
+    if not torch:
+        return 'cpu'
+    if torch.backends.mps.is_available():
+        return 'mps'
+    if torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
+
+def load_modality_model(modality, model_name, hf_token=None):
+    """Load embedding backbones for the requested modality"""
+    device = get_torch_device()
+
+    if modality == 'text':
+        model_kwargs = {
+            'device': device,
+            'trust_remote_code': True
+        }
+        if hf_token:
+            model_kwargs['token'] = hf_token
+
+        model = SentenceTransformer(model_name, **model_kwargs)
+        return {
+            'device': device,
+            'model_name': model_name,
+            'modality': modality,
+            'text_model': model,
+            'preprocessing': None,
+            'dtype': torch.float32,
+        }
+
+    if modality == 'image':
+        missing = []
+        if SiglipVisionModel is None or SiglipTextModel is None or SiglipProcessor is None:
+            missing.append('transformers')
+        if transforms is None or InterpolationMode is None:
+            missing.append('torchvision')
+        if Image is None:
+            missing.append('Pillow')
+
+        if missing:
+            st.error("❌ Image embedding support requires additional dependencies.")
+            st.info(
+                "Install the following packages and restart: " +
+                ", ".join(sorted(set(missing)))
+            )
+            st.stop()
+
+        dtype = torch.float16 if device != 'cpu' else torch.float32
+
+        model_kwargs = {
+            'torch_dtype': dtype
+        }
+        if hf_token:
+            model_kwargs['token'] = hf_token
+
+        processor_kwargs = {}
+        if hf_token:
+            processor_kwargs['token'] = hf_token
+
+        vision_model = SiglipVisionModel.from_pretrained(model_name, **model_kwargs)
+        text_model = SiglipTextModel.from_pretrained(model_name, **model_kwargs)
+        processor = SiglipProcessor.from_pretrained(model_name, **processor_kwargs)
+
+        vision_model = vision_model.to(device)
+        text_model = text_model.to(device)
+        vision_model.eval()
+        text_model.eval()
+
+        # Prepare preprocessing pipeline
+        image_mean = processor.image_processor.image_mean
+        image_std = processor.image_processor.image_std
+        image_size = 384
+        if hasattr(processor.image_processor, 'size'):
+            size_cfg = processor.image_processor.size
+            if isinstance(size_cfg, dict):
+                image_size = size_cfg.get('shortest_edge', size_cfg.get('height', image_size))
+            elif isinstance(size_cfg, int):
+                image_size = size_cfg
+
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=image_mean, std=image_std),
+        ])
+
+        preprocessing_config = {
+            'size': [image_size, image_size],
+            'mean': image_mean,
+            'std': image_std,
+            'interpolation': 'bicubic',
+            'dtype': 'fp16' if dtype == torch.float16 else 'fp32',
+        }
+
+        return {
+            'device': device,
+            'model_name': model_name,
+            'modality': modality,
+            'vision_model': vision_model,
+            'text_model': text_model,
+            'processor': processor,
+            'transform': transform,
+            'preprocessing': preprocessing_config,
+            'dtype': dtype,
+        }
+
+    raise ValueError(f"Unsupported modality: {modality}")
+
+def load_image_from_identifier(identifier):
+    """Load a PIL image from a CSV identifier."""
+    if identifier is None:
+        return None
+
+    try:
+        if isinstance(identifier, Image.Image):
+            return identifier.convert('RGB')
+
+        if hasattr(identifier, 'read'):
+            return Image.open(identifier).convert('RGB')
+
+        if isinstance(identifier, bytes):
+            return Image.open(BytesIO(identifier)).convert('RGB')
+
+        if isinstance(identifier, str):
+            stripped = identifier.strip()
+            if stripped.startswith('data:image') and ',' in stripped:
+                _, b64_data = stripped.split(',', 1)
+                image_bytes = base64.b64decode(b64_data)
+                return Image.open(BytesIO(image_bytes)).convert('RGB')
+            if os.path.exists(stripped):
+                return Image.open(stripped).convert('RGB')
+    except Exception:
+        return None
+
+    return None
+
+def encode_image_identifiers(image_identifiers, resources, batch_size=16, progress_callback=None):
+    """Encode image identifiers into normalized embeddings."""
+    if not torch or not F:
+        raise RuntimeError("PyTorch is required for image encoding")
+
+    vision_model = resources['vision_model']
+    transform = resources['transform']
+    device = resources['device']
+    dtype = resources['dtype']
+
+    embeddings = [None] * len(image_identifiers)
+    failed = []
+
+    pixel_batch = []
+    batch_indices = []
+
+    def process_batch(batch_pixels, indices):
+        if not batch_pixels:
+            return
+        batch_tensor = torch.stack(batch_pixels)
+        batch_tensor = batch_tensor.to(device=device, dtype=dtype)
+        with torch.no_grad():
+            outputs = vision_model(pixel_values=batch_tensor)
+            if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+                feats = outputs.pooler_output
+            else:
+                feats = outputs.last_hidden_state[:, 0]
+            feats = F.normalize(feats, p=2, dim=-1)
+        feats = feats.detach().cpu().numpy()
+        for idx, feat in zip(indices, feats):
+            embeddings[idx] = feat
+
+    for idx, identifier in enumerate(image_identifiers):
+        image = load_image_from_identifier(identifier)
+        if image is None:
+            failed.append(identifier)
+            continue
+
+        pixel = transform(image)
+        pixel_batch.append(pixel)
+        batch_indices.append(idx)
+
+        if len(pixel_batch) >= batch_size:
+            process_batch(pixel_batch, batch_indices)
+            pixel_batch = []
+            batch_indices = []
+            if progress_callback:
+                progress_callback(idx + 1, len(image_identifiers))
+
+    if pixel_batch:
+        process_batch(pixel_batch, batch_indices)
+        if progress_callback:
+            progress_callback(len(image_identifiers), len(image_identifiers))
+
+    embedding_dim = None
+    for emb in embeddings:
+        if emb is not None:
+            embedding_dim = len(emb)
+            break
+
+    if embedding_dim is None:
+        raise ValueError("No valid images were processed. Check your image paths or data format.")
+
+    for idx, emb in enumerate(embeddings):
+        if emb is None:
+            embeddings[idx] = np.zeros(embedding_dim, dtype=np.float32)
+
+    return np.vstack(embeddings), failed
+
 def get_embeddings_dir():
     """Get or create the embeddings directory"""
     embeddings_dir = Path("embeddings_cache")
     embeddings_dir.mkdir(exist_ok=True)
     return embeddings_dir
 
-def generate_embedding_hash(texts, model_name):
+def generate_embedding_hash(items, model_name, metadata=None):
     """Generate a unique hash for the embedding configuration"""
-    # Create a hash based on the texts and model name
-    text_sample = str(texts[:100]) if len(texts) > 100 else str(texts)  # Sample for efficiency
-    content = f"{text_sample}_{model_name}_{len(texts)}"
-    return hashlib.md5(content.encode()).hexdigest()
+    sample = items[:100] if len(items) > 100 else items
+    try:
+        sample_repr = json.dumps(sample, sort_keys=True, default=str)
+    except TypeError:
+        sample_repr = str(sample)
 
-def save_embeddings(embeddings, texts, model_name, metadata=None):
+    hasher = hashlib.md5()
+    hasher.update(sample_repr.encode())
+    hasher.update(model_name.encode())
+    hasher.update(str(len(items)).encode())
+
+    if metadata:
+        metadata_for_hash = {
+            'modality': metadata.get('modality'),
+            'preprocessing': metadata.get('preprocessing'),
+        }
+        identifiers = metadata.get('identifiers')
+        if identifiers:
+            identifiers_sample = identifiers[:100] if len(identifiers) > 100 else identifiers
+            try:
+                identifier_repr = json.dumps(identifiers_sample, sort_keys=True, default=str)
+            except TypeError:
+                identifier_repr = str(identifiers_sample)
+            metadata_for_hash['identifiers_hash'] = hashlib.md5(identifier_repr.encode()).hexdigest()
+
+        hasher.update(json.dumps(metadata_for_hash, sort_keys=True, default=str).encode())
+
+    return hasher.hexdigest()
+
+def save_embeddings(embeddings, items, model_name, metadata=None):
     """Save embeddings to disk"""
     try:
         embeddings_dir = get_embeddings_dir()
-        embedding_hash = generate_embedding_hash(texts, model_name)
+        embedding_hash = generate_embedding_hash(items, model_name, metadata)
         
         # Create filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -218,7 +486,8 @@ def save_embeddings(embeddings, texts, model_name, metadata=None):
         data = {
             'embeddings': embeddings,
             'model_name': model_name,
-            'num_texts': len(texts),
+            'num_texts': len(items),
+            'num_items': len(items),
             'embedding_dim': embeddings.shape[1] if hasattr(embeddings, 'shape') else None,
             'timestamp': timestamp,
             'metadata': metadata or {}
@@ -252,14 +521,18 @@ def list_saved_embeddings():
         try:
             data = load_embeddings(filepath)
             if data:
+                metadata = data.get('metadata', {})
                 embeddings_info.append({
                     'filepath': filepath,
                     'filename': filepath.name,
                     'model_name': data.get('model_name', 'Unknown'),
-                    'num_texts': data.get('num_texts', 0),
+                    'num_texts': data.get('num_texts', data.get('num_items', 0)),
+                    'num_items': data.get('num_items', data.get('num_texts', 0)),
                     'embedding_dim': data.get('embedding_dim', 0),
                     'timestamp': data.get('timestamp', 'Unknown'),
-                    'size_mb': filepath.stat().st_size / (1024 * 1024)
+                    'size_mb': filepath.stat().st_size / (1024 * 1024),
+                    'metadata': metadata,
+                    'modality': metadata.get('modality', 'text'),
                 })
         except:
             continue
@@ -702,16 +975,40 @@ if uploaded_file is not None:
         df = st.session_state.df
         
         st.sidebar.success(f"✅ Loaded {len(df)} rows")
-        
+
         # Step 2: Column Selection
         st.sidebar.subheader("📊 Column Selection")
-        
-        text_column = st.sidebar.selectbox(
-            "Text Column (to embed)",
-            options=df.columns.tolist(),
-            help="Select the column containing text to embed"
+
+        modality = st.sidebar.selectbox(
+            "Input Modality",
+            options=["text", "image"],
+            index=0 if st.session_state.modality == 'text' else 1,
+            format_func=lambda m: "📝 Text" if m == 'text' else "🖼️ Image",
+            help="Choose whether to create text or image embeddings"
         )
-        
+
+        if modality != st.session_state.modality:
+            st.session_state.modality = modality
+            st.session_state.processed = False
+            st.session_state.embeddings = None
+
+        is_image_modality = modality == 'image'
+
+        if is_image_modality:
+            input_column = st.sidebar.selectbox(
+                "Image Column (paths, URLs, or data URIs)",
+                options=df.columns.tolist(),
+                help="Select the column containing image references to embed"
+            )
+        else:
+            input_column = st.sidebar.selectbox(
+                "Text Column (to embed)",
+                options=df.columns.tolist(),
+                help="Select the column containing text to embed"
+            )
+
+        text_column = input_column
+
         label_column = st.sidebar.selectbox(
             "Label Column (for node titles)",
             options=['Index'] + df.columns.tolist(),
@@ -760,21 +1057,26 @@ if uploaded_file is not None:
         st.sidebar.subheader("🤖 Embedding Settings")
         
         # Check for saved embeddings
-        saved_embeddings = list_saved_embeddings()
-        
+        saved_embeddings_all = list_saved_embeddings()
+        current_modality = st.session_state.modality
+        saved_embeddings = [info for info in saved_embeddings_all if info.get('modality', 'text') == current_modality]
+
         use_cached = st.sidebar.checkbox(
             "📁 Use Cached Embeddings",
             value=False,
             help="Load previously saved embeddings instead of creating new ones"
         )
-        
+
+        save_embeddings_checkbox = False
+
         if use_cached and saved_embeddings:
             st.sidebar.markdown("**Available Cached Embeddings:**")
-            
+
             # Create a selection for cached embeddings
             embedding_options = []
             for idx, emb_info in enumerate(saved_embeddings):
-                label = f"{emb_info['model_name']} | {emb_info['num_texts']} texts | {emb_info['timestamp']}"
+                item_label = "items" if emb_info.get('num_items', emb_info.get('num_texts', 0)) != 1 else "item"
+                label = f"[{emb_info.get('modality', 'text').title()}] {emb_info['model_name']} | {emb_info.get('num_items', emb_info.get('num_texts', 0))} {item_label} | {emb_info['timestamp']}"
                 embedding_options.append(label)
             
             selected_cache_idx = st.sidebar.selectbox(
@@ -789,34 +1091,42 @@ if uploaded_file is not None:
             # Display cache info
             with st.sidebar.expander("📊 Cache Details"):
                 st.markdown(f"""
-                **Model:** {selected_cache['model_name']}  
-                **Texts:** {selected_cache['num_texts']}  
-                **Dimensions:** {selected_cache['embedding_dim']}D  
-                **Size:** {selected_cache['size_mb']:.2f} MB  
+                **Model:** {selected_cache['model_name']}
+                **Items:** {selected_cache.get('num_items', selected_cache.get('num_texts', 0))}
+                **Dimensions:** {selected_cache['embedding_dim']}D
+                **Size:** {selected_cache['size_mb']:.2f} MB
                 **Created:** {selected_cache['timestamp']}
                 """)
-            
+
             model_name = selected_cache['model_name']  # For compatibility
         else:
             if use_cached and not saved_embeddings:
-                st.sidebar.warning("⚠️ No cached embeddings found")
-            
-            model_name = st.sidebar.selectbox(
-                "Embedding Model",
-                options=[
-                    "google/embeddinggemma-300m",
-                    "nomic-ai/nomic-embed-text-v1.5", 
-                    "BAAI/bge-base-en-v1.5",
-                    "sentence-transformers/all-mpnet-base-v2"
-                ],
-                help="Choose the embedding model (EmbeddingGemma-300m is best under 500M params)"
-            )
-            
+                st.sidebar.warning("⚠️ No cached embeddings found for this modality")
+
+            if is_image_modality:
+                model_name = "google/siglip-so400m-patch14-384"
+                st.sidebar.info(
+                    "Using google/siglip-so400m-patch14-384 for image embeddings (1152-D)."
+                )
+            else:
+                model_name = st.sidebar.selectbox(
+                    "Embedding Model",
+                    options=[
+                        "google/embeddinggemma-300m",
+                        "nomic-ai/nomic-embed-text-v1.5",
+                        "BAAI/bge-base-en-v1.5",
+                        "sentence-transformers/all-mpnet-base-v2"
+                    ],
+                    help="Choose the embedding model (EmbeddingGemma-300m is best under 500M params)"
+                )
+
             save_embeddings_checkbox = st.sidebar.checkbox(
                 "💾 Save Embeddings for Later",
                 value=True,
                 help="Save created embeddings to disk for future use"
             )
+
+        save_embeddings_selected = save_embeddings_checkbox
         
         # Step 5: Process Button
         if st.sidebar.button("🚀 Process Data", type="primary", use_container_width=True):
@@ -835,6 +1145,9 @@ if uploaded_file is not None:
                     step_start = time.time()
                     original_count = len(df)
                     df_clean = df.dropna(subset=[text_column]).reset_index(drop=True)
+                    df_clean[text_column] = df_clean[text_column].astype(str)
+                    if is_image_modality:
+                        df_clean[text_column] = df_clean[text_column].str.strip()
                     cleaned_count = len(df_clean)
                     
                     # Create label column
@@ -865,130 +1178,177 @@ if uploaded_file is not None:
                 status_text.text("🤖 Loading embedding model...")
                 details_text.text(f"Model: {model_name}")
                 progress_bar.progress(10)
-                
+
                 step_start = time.time()
-                device = 'mps' if torch.backends.mps.is_available() else ('cuda' if torch.cuda.is_available() else 'cpu')
-                
-                # Prepare model loading with token
-                model_kwargs = {
-                    'device': device,
-                    'trust_remote_code': True
-                }
-                
-                # Add token if available
-                if st.session_state.hf_token:
-                    model_kwargs['token'] = st.session_state.hf_token
-                    details_text.text(f"Model: {model_name} (with authentication)")
-                else:
-                    details_text.text(f"Model: {model_name} (no token)")
-                
+
                 try:
-                    model = SentenceTransformer(model_name, **model_kwargs)
-                    st.session_state.model = model
+                    model_resources = load_modality_model(
+                        modality,
+                        model_name,
+                        hf_token=st.session_state.hf_token or None,
+                    )
+                    device = model_resources['device']
+                    dtype_label = model_resources.get('preprocessing', {}).get('dtype', 'fp32') if modality == 'image' else 'fp32'
+
+                    auth_label = 'with authentication' if st.session_state.hf_token else 'no token'
+                    details_text.text(f"Model: {model_name} ({device.upper()}, {auth_label})")
+
+                    if modality == 'text':
+                        st.session_state.model = model_resources['text_model']
+                    else:
+                        st.session_state.model = model_resources['vision_model']
+
                     step_time = time.time() - step_start
                     processing_steps.append({
                         'step': 'Model Loading',
                         'time': step_time,
-                        'details': f"Device: {device.upper()} - Authenticated: {'Yes' if st.session_state.hf_token else 'No'}"
+                        'details': f"Device: {device.upper()} | Precision: {dtype_label} | Authenticated: {'Yes' if st.session_state.hf_token else 'No'}"
                     })
                 except Exception as model_error:
-                    # Handle authentication errors
-                    if "401" in str(model_error) or "authentication" in str(model_error).lower():
+                    message = str(model_error)
+                    if "401" in message or "authentication" in message.lower():
                         st.error(f"❌ Authentication failed for model {model_name}")
                         st.error("Please check your Hugging Face token and ensure you have accepted the model's terms of use.")
                         st.error("Get your token at: https://huggingface.co/settings/tokens")
-                        processing_placeholder.empty()
-                        st.stop()
-                    elif "gated" in str(model_error).lower() or "private" in str(model_error).lower():
+                    elif "gated" in message.lower() or "private" in message.lower():
                         st.error(f"❌ Model {model_name} requires authentication")
                         st.error("Please enter a valid Hugging Face token in the sidebar.")
-                        processing_placeholder.empty()
-                        st.stop()
                     else:
-                        st.error(f"❌ Failed to load model {model_name}: {str(model_error)}")
-                        processing_placeholder.empty()
-                        st.stop()
+                        st.error(f"❌ Failed to load model {model_name}: {message}")
+                    processing_placeholder.empty()
+                    st.stop()
                 
                 # Create or load embeddings
                 try:
-                    texts_to_embed = df_clean[text_column].tolist()
-                    total_texts = len(texts_to_embed)
-                    
+                    items_to_embed = df_clean[text_column].tolist()
+                    total_items = len(items_to_embed)
+                    failed_items = []
+
+                    metadata_context = {
+                        'modality': modality,
+                        'preprocessing': model_resources.get('preprocessing'),
+                    }
+                    if is_image_modality:
+                        metadata_context['image_column'] = text_column
+                        metadata_context['identifiers'] = items_to_embed
+                    else:
+                        metadata_context['text_column'] = text_column
+
                     # Check if we should use cached embeddings
                     if use_cached and saved_embeddings:
                         status_text.text("📁 Loading cached embeddings...")
                         progress_bar.progress(20)
-                        
+
                         step_start = time.time()
-                        
-                        # Load the selected cached embeddings
+
                         cached_data = load_embeddings(selected_cache['filepath'])
-                        
-                        if cached_data and cached_data['num_texts'] == total_texts:
-                            embeddings = cached_data['embeddings']
-                            st.session_state.embeddings = embeddings
-                            
-                            step_time = time.time() - step_start
-                            processing_steps.append({
-                                'step': 'Load Cached Embeddings',
-                                'time': step_time,
-                                'details': f"Loaded {len(embeddings)} embeddings ({embeddings.shape[1]}D) from cache"
-                            })
-                            
-                            status_text.text("✅ Cached embeddings loaded!")
-                            details_text.text(f"Loaded {total_texts} embeddings in {step_time:.2f}s")
+
+                        if cached_data:
+                            cached_count = cached_data.get('num_items', cached_data.get('num_texts', 0))
+                            cached_metadata = cached_data.get('metadata', {})
+                            cached_modality = cached_metadata.get('modality', 'text')
+
+                            if cached_modality != modality:
+                                st.warning("⚠️ Cached embeddings are for a different modality. Creating new embeddings instead...")
+                                use_cached = False
+                                if not save_embeddings_selected:
+                                    save_embeddings_selected = True
+                            elif cached_count == total_items:
+                                embeddings = cached_data['embeddings']
+                                st.session_state.embeddings = embeddings
+
+                                step_time = time.time() - step_start
+                                processing_steps.append({
+                                    'step': 'Load Cached Embeddings',
+                                    'time': step_time,
+                                    'details': f"Loaded {len(embeddings)} embeddings ({embeddings.shape[1]}D) from cache"
+                                })
+
+                                status_text.text("✅ Cached embeddings loaded!")
+                                details_text.text(f"Loaded {total_items} embeddings in {step_time:.2f}s")
+                            else:
+                                st.warning("⚠️ Cached embeddings don't match current data size. Creating new embeddings...")
+                                use_cached = False
+                                if not save_embeddings_selected:
+                                    save_embeddings_selected = True
                         else:
-                            st.warning("⚠️ Cached embeddings don't match current data size. Creating new embeddings...")
-                            use_cached = False  # Fall through to create new embeddings
-                    
+                            st.warning("⚠️ Failed to load cached embeddings. Creating new embeddings...")
+                            use_cached = False
+                            if not save_embeddings_selected:
+                                save_embeddings_selected = True
+
                     if not use_cached or not saved_embeddings:
-                        status_text.text("🔤 Creating text embeddings...")
+                        creation_label = "image" if is_image_modality else "text"
+                        status_text.text(f"{'🖼️' if is_image_modality else '🔤'} Creating {creation_label} embeddings...")
                         progress_bar.progress(20)
-                        
+
                         step_start = time.time()
-                        
+
                         # Show embedding progress
                         embedding_progress = st.progress(0)
-                        batch_size = 64
-                        num_batches = (total_texts + batch_size - 1) // batch_size
-                        
-                        embeddings = []
-                        for i in range(0, total_texts, batch_size):
-                            batch_texts = texts_to_embed[i:i+batch_size]
-                            batch_embeddings = model.encode(
-                                batch_texts,
-                                batch_size=batch_size,
-                                show_progress_bar=False,
-                                normalize_embeddings=True
+
+                        failed_items = []
+
+                        if is_image_modality:
+                            def image_progress(completed, total):
+                                progress = 0 if total == 0 else min(completed / total, 1.0)
+                                embedding_progress.progress(progress)
+                                status_text.text(f"🖼️ Creating embeddings... {completed}/{total}")
+                                details_text.text(f"Processed {completed}/{total} images")
+
+                            embeddings, failed_items = encode_image_identifiers(
+                                items_to_embed,
+                                model_resources,
+                                batch_size=16,
+                                progress_callback=image_progress
                             )
-                            embeddings.extend(batch_embeddings)
-                            
-                            # Update progress
-                            batch_num = i // batch_size + 1
-                            progress = min((batch_num / num_batches), 1.0)  # Progress from 0 to 1
-                            embedding_progress.progress(progress)
-                            status_text.text(f"🔤 Creating embeddings... Batch {batch_num}/{num_batches}")
-                            details_text.text(f"Processed {min(i + batch_size, total_texts)}/{total_texts} texts")
-                        
-                        embeddings = np.array(embeddings)
+                            if failed_items:
+                                st.warning(f"⚠️ {len(failed_items)} images could not be loaded. Zero vectors were inserted.")
+                        else:
+                            text_model = model_resources['text_model']
+                            batch_size = 64
+                            num_batches = (total_items + batch_size - 1) // batch_size
+                            embeddings = []
+
+                            for i in range(0, total_items, batch_size):
+                                batch_texts = items_to_embed[i:i+batch_size]
+                                batch_embeddings = text_model.encode(
+                                    batch_texts,
+                                    batch_size=batch_size,
+                                    show_progress_bar=False,
+                                    normalize_embeddings=True
+                                )
+                                embeddings.extend(batch_embeddings)
+
+                                batch_num = i // batch_size + 1
+                                progress = min((batch_num / num_batches), 1.0)
+                                embedding_progress.progress(progress)
+                                status_text.text(f"🔤 Creating embeddings... Batch {batch_num}/{num_batches}")
+                                details_text.text(f"Processed {min(i + batch_size, total_items)}/{total_items} texts")
+
+                            embeddings = np.array(embeddings)
+
                         st.session_state.embeddings = embeddings
                         embedding_progress.empty()
-                        
+
                         step_time = time.time() - step_start
+                        detail_suffix = ''
+                        if is_image_modality and failed_items:
+                            detail_suffix = f" | Failed loads: {len(failed_items)}"
                         processing_steps.append({
-                            'step': 'Text Embeddings',
+                            'step': 'Image Embeddings' if is_image_modality else 'Text Embeddings',
                             'time': step_time,
-                            'details': f"Created {len(embeddings)} embeddings ({embeddings.shape[1]}D)"
+                            'details': f"Created {len(embeddings)} embeddings ({embeddings.shape[1]}D){detail_suffix}"
                         })
-                        
+
                         # Save embeddings if requested
-                        if save_embeddings_checkbox:
+                        if save_embeddings_selected:
                             status_text.text("💾 Saving embeddings to cache...")
                             save_path, emb_hash = save_embeddings(
                                 embeddings,
-                                texts_to_embed,
+                                items_to_embed,
                                 model_name,
-                                metadata={'text_column': text_column}
+                                metadata=metadata_context
                             )
                             if save_path:
                                 details_text.text(f"Saved to: {save_path.name}")
@@ -997,7 +1357,7 @@ if uploaded_file is not None:
                                     'time': 0,
                                     'details': f"Saved to embeddings_cache/{save_path.name}"
                                 })
-                    
+
                     progress_bar.progress(50)
                 except Exception as embed_error:
                     st.error(f"❌ Error with embeddings: {str(embed_error)}")
@@ -1068,7 +1428,10 @@ if uploaded_file is not None:
                     df_clean['y'] = embeddings_2d[:, 1]
                     
                     # Create hover text
-                    df_clean['hover_text'] = df_clean[text_column].str[:150] + '...'
+                    if is_image_modality:
+                        df_clean['hover_text'] = df_clean['label']
+                    else:
+                        df_clean['hover_text'] = df_clean[text_column].str[:150] + '...'
                     
                     step_time = time.time() - step_start
                     processing_steps.append({
@@ -1093,7 +1456,8 @@ if uploaded_file is not None:
                 step_start = time.time()
                 st.session_state.df = df_clean
                 st.session_state.processed = True
-                st.session_state.text_column = text_column
+                st.session_state.text_column = text_column if not is_image_modality else 'hover_text'
+                st.session_state.modality = modality
                 
                 # Store processing info
                 total_time = time.time() - start_time
@@ -1106,7 +1470,9 @@ if uploaded_file is not None:
                         'noise_points': noise_points,
                         'embedding_dim': embeddings.shape[1],
                         'model': model_name,
-                        'device': device.upper()
+                        'device': device.upper(),
+                        'modality': modality,
+                        'failed_items': len(failed_items) if is_image_modality else 0
                     }
                 }
                 
@@ -1135,7 +1501,8 @@ if uploaded_file is not None:
                 
                 with summary_col3:
                     st.metric("Embedding Dim", f"{embeddings.shape[1]}D")
-                    st.metric("Processing Speed", f"{len(df_clean)/total_time:.1f} texts/sec")
+                    speed_unit = "images/sec" if is_image_modality else "texts/sec"
+                    st.metric("Processing Speed", f"{len(df_clean)/total_time:.1f} {speed_unit}")
                 
                 # Detailed timing breakdown
                 with st.expander("⏱️ Detailed Timing Breakdown"):
@@ -1180,156 +1547,160 @@ if st.session_state.processed and st.session_state.df is not None:
     
     with tab1:
         st.header("🔍 Semantic Search")
-        st.markdown("Search for nodes semantically similar to your query.")
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            search_query = st.text_input(
-                "Search Query",
-                placeholder="e.g., 'civilian casualties', 'economic impact', 'political statements'...",
-                help="Enter a search query to find semantically similar nodes"
-            )
-        
-        with col2:
-            top_k = st.number_input(
-                "Top Results",
-                min_value=5,
-                max_value=100,
-                value=20,
-                help="Number of most similar nodes to highlight"
-            )
-        
-        if search_query and st.button("🔎 Search", type="primary"):
-            # Create search placeholder
-            search_placeholder = st.empty()
-            
-            with search_placeholder.container():
-                st.markdown("### 🔍 Searching for Similar Content")
-                
-                # Search progress
-                search_progress = st.progress(0)
-                search_status = st.empty()
-                search_details = st.empty()
-                
-                search_start = time.time()
-                
-                # Step 1: Embed the query
-                search_status.text("🔤 Encoding search query...")
-                search_details.text(f"Query: '{search_query}'")
-                search_progress.progress(25)
-                
-                query_embedding = st.session_state.model.encode(
-                    [search_query],
-                    normalize_embeddings=True
-                )[0]
-                
-                # Step 2: Calculate similarities
-                search_status.text("📊 Calculating similarities...")
-                search_details.text(f"Comparing with {len(st.session_state.embeddings)} documents")
-                search_progress.progress(50)
-                
-                similarities = np.dot(st.session_state.embeddings, query_embedding)
-                
-                # Step 3: Find top results
-                search_status.text("🎯 Ranking results...")
-                search_details.text(f"Finding top {top_k} most similar documents")
-                search_progress.progress(75)
-                
-                top_indices = np.argsort(similarities)[-top_k:][::-1]
-                top_scores = similarities[top_indices]
-                
-                # Step 4: Prepare results
-                search_status.text("📋 Preparing results...")
-                search_progress.progress(90)
-                
-                results_df = df.iloc[top_indices].copy()
-                results_df['similarity'] = top_scores
-                results_df['rank'] = range(1, len(results_df) + 1)
-                
-                # Calculate search statistics
-                search_time = time.time() - search_start
-                avg_similarity = np.mean(top_scores)
-                similarity_range = f"{top_scores.min():.3f} - {top_scores.max():.3f}"
-                
-                search_progress.progress(100)
-                search_status.text("✅ Search complete!")
-                search_details.text(f"Found {top_k} results in {search_time:.2f}s")
-                
-                # Clear search placeholder after a delay
-                time.sleep(1.5)
-                search_placeholder.empty()
-            
-            # Display search summary
-            st.markdown("### 📊 Search Results Summary")
-            summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
-            
-            with summary_col1:
-                st.metric("Query Length", len(search_query))
-            
-            with summary_col2:
-                st.metric("Search Time", f"{search_time:.2f}s")
-            
-            with summary_col3:
-                st.metric("Avg Similarity", f"{avg_similarity:.3f}")
-            
-            with summary_col4:
-                st.metric("Similarity Range", similarity_range)
-            
-            # Display results
-            st.subheader(f"🎯 Top {top_k} Results")
-            
-            # Add similarity threshold indicator
-            threshold = st.slider(
-                "Similarity Threshold",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.0,
-                step=0.01,
-                help="Filter results by minimum similarity score"
-            )
-            
-            # Filter results by threshold
-            filtered_results = results_df[results_df['similarity'] >= threshold].copy()
-            
-            if len(filtered_results) == 0:
-                st.warning("No results meet the similarity threshold. Try lowering the threshold.")
-            else:
-                # Show results table with enhanced formatting
-                display_cols = ['rank', 'similarity', 'cluster_label', 'label', 'hover_text']
-                
-                # Color-code similarity scores
-                def color_similarity(val):
-                    if val >= 0.8:
-                        return 'background-color: #d4edda'
-                    elif val >= 0.6:
-                        return 'background-color: #fff3cd'
-                    else:
-                        return 'background-color: #f8d7da'
-                
-                styled_df = filtered_results[display_cols].style.format({
-                    'similarity': '{:.3f}',
-                    'rank': '{}'
-                }).applymap(color_similarity, subset=['similarity'])
-                
-                st.dataframe(
-                    styled_df,
-                    use_container_width=True,
-                    hide_index=True
+        current_modality = st.session_state.get('modality', 'text')
+        if current_modality == 'image':
+            st.info("Semantic text search is unavailable for image embeddings. Switch to text modality to enable search.")
+        else:
+            st.markdown("Search for nodes semantically similar to your query.")
+
+            col1, col2 = st.columns([3, 1])
+
+            with col1:
+                search_query = st.text_input(
+                    "Search Query",
+                    placeholder="e.g., 'civilian casualties', 'economic impact', 'political statements'...",
+                    help="Enter a search query to find semantically similar nodes"
                 )
-                
-                # Show cluster distribution of results
-                st.subheader("📈 Cluster Distribution of Results")
-                cluster_dist = filtered_results['cluster_label'].value_counts().reset_index()
-                cluster_dist.columns = ['Cluster', 'Count']
-                cluster_dist['Percentage'] = (cluster_dist['Count'] / len(filtered_results) * 100).round(1)
-                
-                st.dataframe(cluster_dist, use_container_width=True, hide_index=True)
-                
-                # Store results for visualization
-                filtered_indices = filtered_results.index.tolist()
-                st.session_state.search_results = filtered_indices
-                st.session_state.search_scores = filtered_results['similarity'].tolist()
+
+            with col2:
+                top_k = st.number_input(
+                    "Top Results",
+                    min_value=5,
+                    max_value=100,
+                    value=20,
+                    help="Number of most similar nodes to highlight"
+                )
+
+            if search_query and st.button("🔎 Search", type="primary"):
+                # Create search placeholder
+                search_placeholder = st.empty()
+
+                with search_placeholder.container():
+                    st.markdown("### 🔍 Searching for Similar Content")
+
+                    # Search progress
+                    search_progress = st.progress(0)
+                    search_status = st.empty()
+                    search_details = st.empty()
+
+                    search_start = time.time()
+
+                    # Step 1: Embed the query
+                    search_status.text("🔤 Encoding search query...")
+                    search_details.text(f"Query: '{search_query}'")
+                    search_progress.progress(25)
+
+                    query_embedding = st.session_state.model.encode(
+                        [search_query],
+                        normalize_embeddings=True
+                    )[0]
+
+                    # Step 2: Calculate similarities
+                    search_status.text("📊 Calculating similarities...")
+                    search_details.text(f"Comparing with {len(st.session_state.embeddings)} documents")
+                    search_progress.progress(50)
+
+                    similarities = np.dot(st.session_state.embeddings, query_embedding)
+
+                    # Step 3: Find top results
+                    search_status.text("🎯 Ranking results...")
+                    search_details.text(f"Finding top {top_k} most similar documents")
+                    search_progress.progress(75)
+
+                    top_indices = np.argsort(similarities)[-top_k:][::-1]
+                    top_scores = similarities[top_indices]
+
+                    # Step 4: Prepare results
+                    search_status.text("📋 Preparing results...")
+                    search_progress.progress(90)
+
+                    results_df = df.iloc[top_indices].copy()
+                    results_df['similarity'] = top_scores
+                    results_df['rank'] = range(1, len(results_df) + 1)
+
+                    # Calculate search statistics
+                    search_time = time.time() - search_start
+                    avg_similarity = np.mean(top_scores)
+                    similarity_range = f"{top_scores.min():.3f} - {top_scores.max():.3f}"
+
+                    search_progress.progress(100)
+                    search_status.text("✅ Search complete!")
+                    search_details.text(f"Found {top_k} results in {search_time:.2f}s")
+
+                    # Clear search placeholder after a delay
+                    time.sleep(1.5)
+                    search_placeholder.empty()
+
+                # Display search summary
+                st.markdown("### 📊 Search Results Summary")
+                summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+
+                with summary_col1:
+                    st.metric("Query Length", len(search_query))
+
+                with summary_col2:
+                    st.metric("Search Time", f"{search_time:.2f}s")
+
+                with summary_col3:
+                    st.metric("Avg Similarity", f"{avg_similarity:.3f}")
+
+                with summary_col4:
+                    st.metric("Similarity Range", similarity_range)
+
+                # Display results
+                st.subheader(f"🎯 Top {top_k} Results")
+
+                # Add similarity threshold indicator
+                threshold = st.slider(
+                    "Similarity Threshold",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.0,
+                    step=0.01,
+                    help="Filter results by minimum similarity score"
+                )
+
+                # Filter results by threshold
+                filtered_results = results_df[results_df['similarity'] >= threshold].copy()
+
+                if len(filtered_results) == 0:
+                    st.warning("No results meet the similarity threshold. Try lowering the threshold.")
+                else:
+                    # Show results table with enhanced formatting
+                    display_cols = ['rank', 'similarity', 'cluster_label', 'label', 'hover_text']
+
+                    # Color-code similarity scores
+                    def color_similarity(val):
+                        if val >= 0.8:
+                            return 'background-color: #d4edda'
+                        elif val >= 0.6:
+                            return 'background-color: #fff3cd'
+                        else:
+                            return 'background-color: #f8d7da'
+
+                    styled_df = filtered_results[display_cols].style.format({
+                        'similarity': '{:.3f}',
+                        'rank': '{}'
+                    }).applymap(color_similarity, subset=['similarity'])
+
+                    st.dataframe(
+                        styled_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    # Show cluster distribution of results
+                    st.subheader("📈 Cluster Distribution of Results")
+                    cluster_dist = filtered_results['cluster_label'].value_counts().reset_index()
+                    cluster_dist.columns = ['Cluster', 'Count']
+                    cluster_dist['Percentage'] = (cluster_dist['Count'] / len(filtered_results) * 100).round(1)
+
+                    st.dataframe(cluster_dist, use_container_width=True, hide_index=True)
+
+                    # Store results for visualization
+                    filtered_indices = filtered_results.index.tolist()
+                    st.session_state.search_results = filtered_indices
+                    st.session_state.search_scores = filtered_results['similarity'].tolist()
                 
                 # Action buttons
                 col1, col2, col3 = st.columns(3)
