@@ -1,18 +1,19 @@
 # 🎯 Semantic Embedding Explorer
 
-A powerful Streamlit application for visualizing and exploring text data using state-of-the-art embeddings and interactive clustering.
+A powerful Streamlit application for visualizing and exploring **text and image data** using state-of-the-art embeddings and interactive clustering.
 
 ## Features
 
-✅ **File Upload** - Any CSV file with text data  
-✅ **Column Selection** - Choose text and label columns  
-✅ **Flexible Clustering** - HDBSCAN (automatic) or KMeans (fixed)  
-✅ **SOTA Embedding Models** - EmbeddingGemma, Nomic, BGE, and more  
-✅ **Embedding Cache** - Save and reuse embeddings for faster processing  
-✅ **Semantic Search** - Find similar nodes by meaning  
-✅ **Interactive Visualization** - Cosmograph with search highlighting  
-✅ **Data Explorer** - Statistics and download options  
-✅ **GPU Acceleration** - Automatic MPS/CUDA detection  
+✅ **File Upload** - Text CSVs, image files, ZIP archives, or CSVs with image URLs
+✅ **Column Selection** - Choose text and label columns
+✅ **Flexible Clustering** - HDBSCAN (automatic) or KMeans (fixed)
+✅ **SOTA Embedding Models** - EmbeddingGemma, Nomic, BGE, and more
+✅ **Embedding Cache** - Save and reuse embeddings for faster processing
+✅ **Semantic Search** - Find similar nodes by meaning
+✅ **Interactive Visualization** - Cosmograph with search highlighting
+✅ **Data Explorer** - Statistics and download options
+✅ **GPU Acceleration** - Automatic MPS/CUDA detection
+✅ **SigLIP Image Embeddings** - Autodetect CPU/GPU for `google/siglip-base-patch16-512`
 
 ## Installation
 
@@ -70,20 +71,29 @@ streamlit run app.py
 
 ### Step-by-step guide:
 
-1. **Upload CSV**: Click "Browse files" in the sidebar and select your CSV file
-2. **Select Columns**: 
-   - Choose which column contains the text to embed
-   - Choose which column to use as labels (node titles)
-   - Optionally select a URL column for clickable links
-3. **Configure Clustering**: Choose automatic (HDBSCAN) or fixed (KMeans) clustering
-4. **Choose Embedding Strategy**:
-   - **Create New**: Select a model and optionally save embeddings for later
-   - **Use Cached**: Load previously saved embeddings (much faster!)
-5. **Process**: Click the "Process Data" button and wait for completion
-6. **Explore**: 
-   - Use **Semantic Search** to find similar nodes
-   - View the **Visualization** to explore clusters
-   - Check **Data Explorer** for statistics and downloads
+1. **Select Modality**: Choose **Text (CSV)** or **Images** from the sidebar.
+2. **Provide Data**:
+   - **Text**: Upload a CSV and choose text/label/link columns.
+   - **Images**: Upload individual images, a ZIP archive, or a CSV of image URLs (with optional label/link/caption columns).
+3. **Review Metadata**: Edit labels, captions, and links directly in the sidebar table (image mode) or via column selectors (text mode).
+4. **Configure Clustering**: Choose automatic (HDBSCAN) or fixed (KMeans) clustering for either modality.
+5. **Choose Embedding Strategy**:
+   - **Create New**: Use Sentence-Transformer models for text or SigLIP for images.
+   - **Use Cached**: Load previously saved embeddings (filter by modality automatically).
+6. **Process**: Click the "Process" button and monitor progress, device selection, and timing breakdowns.
+7. **Explore**:
+   - Use **Semantic Search** for caption-based or image-based queries.
+   - View the **Visualization** to explore clusters with thumbnails and captions.
+   - Check **Data Explorer** for statistics, preview galleries, and downloads.
+
+### 🖼️ Image Workflow
+
+1. **Source Selection**: Choose between uploading individual images, a ZIP archive, or a CSV of URLs.
+2. **Metadata Editing**: Update labels, optional captions, and outbound links inside the interactive data editor.
+3. **SigLIP Embeddings**: The app downloads and caches `google/siglip-base-patch16-512` using Hugging Face Transformers, automatically detecting CUDA, MPS, or CPU execution.
+4. **Caching**: Image embeddings are hashed by filename/URL so repeat runs are instantaneous.
+5. **Visualization**: Hover cards include thumbnails, captions, and links; previews are available in the Data Explorer.
+6. **Semantic Search**: Search with natural-language prompts (captioning) or upload a query image to find visually similar results.
 
 ### Features in Detail:
 
@@ -103,9 +113,10 @@ The app automatically saves embeddings to the `embeddings_cache/` folder, provid
 **Note:** Embeddings are saved in `embeddings_cache/` (automatically created and git-ignored)
 
 #### 🔍 Semantic Search
-- Enter natural language queries to find semantically similar content
-- Results are highlighted in red in the visualization
-- Shows similarity scores and rankings
+- Enter natural language queries to find semantically similar **documents** (text mode)
+- Describe an image or upload a query image to locate visually similar **thumbnails** (image mode)
+- Results are highlighted in red in the visualization and include captions/links when available
+- Shows similarity scores, rankings, and cluster summaries
 
 #### 📊 Interactive Visualization
 - Powered by Cosmograph for smooth, interactive exploration
@@ -120,29 +131,48 @@ The app automatically saves embeddings to the `embeddings_cache/` folder, provid
 
 ## Supported Embedding Models (October 2025 SOTA)
 
+### Text Embeddings
 - **google/embeddinggemma-300m** - Best under 500M params, SOTA efficient model
 - **nomic-ai/nomic-embed-text-v1.5** - Excellent balance of performance and speed
 - **BAAI/bge-base-en-v1.5** - Mid-size BGE model, strong retrieval performance
 - **sentence-transformers/all-mpnet-base-v2** - Reliable baseline option
 
-All models are optimized for semantic search and clustering tasks.
+### Image Embeddings
+- **google/siglip-base-patch16-512** - Vision-language model with 512-dim embeddings
+  - ⚙️ **CPU**: Works out of the box; expect ~1s per image on modern laptops
+  - ⚡ **GPU (6GB+ VRAM recommended)**: Dramatically faster batch inference
+  - 💾 **RAM**: 8GB minimum, 16GB recommended for large ZIP archives
+- Automatic caching stores image signatures, captions, and preprocessing metadata for reuse.
+
+All models are optimized for semantic search and clustering tasks across modalities.
 
 ## System Requirements
 
 - Python 3.8+
-- 8GB+ RAM recommended (for larger datasets)
+- 8GB+ RAM recommended (16GB for large image batches)
 - GPU support (optional but recommended):
-  - NVIDIA CUDA for Windows/Linux
+  - NVIDIA CUDA (6GB+ VRAM) for high-throughput text & image embeddings
   - Apple Metal Performance Shaders (MPS) for Mac
+- Additional runtime dependencies (auto-checked by the app): `Pillow`, `torchvision`, `requests`, `transformers`
 
 ## CSV Format Requirements
 
+### Text CSVs
 Your CSV file should contain at least one text column. Example format:
 
 ```csv
 text,label,url (optional)
 "Sample text content here","Document 1","https://example.com/doc1"
 "Another piece of text","Document 2","https://example.com/doc2"
+```
+
+### Image URL CSVs
+Provide a column containing image URLs, with optional label/link/caption columns:
+
+```csv
+image_url,label,link,caption
+"https://example.com/image1.png","Mountains","https://example.com","Sunset over snowy peaks"
+"https://example.com/image2.jpg","Cyclist","","Person riding a bike at dusk"
 ```
 
 ## Performance Tips
