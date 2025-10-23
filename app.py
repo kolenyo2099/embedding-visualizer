@@ -437,12 +437,16 @@ def encode_images_with_siglip(records, model, processor, device, batch_size=8):
         if not pil_images:
             continue
 
-        inputs = processor(images=pil_images, return_tensors='pt')
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        processed = processor(images=pil_images, return_tensors='pt')
+        pixel_values = processed.get('pixel_values')
+
+        if pixel_values is None:
+            continue
+
+        pixel_values = pixel_values.to(device)
 
         with torch.no_grad():
-            outputs = model(**inputs)
-            image_embeds = outputs.image_embeds
+            image_embeds = model.get_image_features(pixel_values=pixel_values)
             image_embeds = torch.nn.functional.normalize(image_embeds, p=2, dim=-1)
 
         embeddings.append(image_embeds.cpu().numpy())
@@ -872,12 +876,33 @@ def generate_cosmograph_html(df, search_results=[], search_scores=[], node_size=
 # Title and description
 st.title("🎯 Semantic Embedding Explorer")
 st.markdown("""
-Visualize and explore text data using state-of-the-art embeddings and interactive clustering.
-Upload a CSV, select columns, and explore semantic relationships in your data.
+Visualize and explore text **or image** data using state-of-the-art embeddings and interactive clustering.
+Choose your modality, upload your sources, and explore semantic relationships in your content.
 """)
 
 # Sidebar for configuration
 st.sidebar.header("⚙️ Configuration")
+
+# Modality selection
+modality_options = ["Text (CSV)", "Images"]
+selected_modality = st.sidebar.radio(
+    "Data Modality",
+    modality_options,
+    index=modality_options.index(st.session_state.modality),
+    help="Switch between processing text data from CSV files or image collections",
+)
+
+if selected_modality != st.session_state.modality:
+    st.session_state.modality = selected_modality
+    st.session_state.processed = False
+    st.session_state.embeddings = None
+
+    if selected_modality == "Text (CSV)":
+        st.session_state.image_records = []
+        st.session_state.image_source_id = None
+    else:
+        st.session_state.df = None
+        st.session_state.uploaded_file_id = None
 
 # Hugging Face Token Input
 with st.sidebar.expander("🔑 Hugging Face Authentication", expanded=False):
