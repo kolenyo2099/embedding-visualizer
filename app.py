@@ -182,6 +182,10 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'processing_info' not in st.session_state:
     st.session_state.processing_info = {}
+if 'search_results' not in st.session_state:
+    st.session_state.search_results = []
+if 'search_scores' not in st.session_state:
+    st.session_state.search_scores = []
 if 'hf_token' not in st.session_state:
     st.session_state.hf_token = ""
 if 'uploaded_file_id' not in st.session_state:
@@ -198,6 +202,23 @@ if 'image_metadata' not in st.session_state:
     st.session_state.image_metadata = {}
 if 'image_source_id' not in st.session_state:
     st.session_state.image_source_id = None
+if 'processed_df' not in st.session_state:
+    st.session_state.processed_df = None
+if 'current_results_modality' not in st.session_state:
+    st.session_state.current_results_modality = None
+
+
+def clear_processed_results():
+    """Remove any stored processed outputs from session state."""
+    st.session_state.df = None
+    st.session_state.embeddings = None
+    st.session_state.processed = False
+    st.session_state.processing_info = {}
+    st.session_state.search_results = []
+    st.session_state.search_scores = []
+    st.session_state.processed_df = None
+    st.session_state.current_results_modality = None
+    st.session_state.image_metadata = {}
 
 def get_system_info():
     """Get system information for display"""
@@ -896,14 +917,12 @@ selected_modality = st.sidebar.radio(
 
 if selected_modality != st.session_state.modality:
     st.session_state.modality = selected_modality
-    st.session_state.processed = False
-    st.session_state.embeddings = None
+    clear_processed_results()
 
     if selected_modality == "Text (CSV)":
         st.session_state.image_records = []
         st.session_state.image_source_id = None
     else:
-        st.session_state.df = None
         st.session_state.raw_df = None
         st.session_state.uploaded_file_id = None
 
@@ -961,9 +980,7 @@ if st.session_state.modality == "Text (CSV)":
             if st.session_state.uploaded_file_id != file_id:
                 df = pd.read_csv(uploaded_file)
                 st.session_state.raw_df = df
-                st.session_state.df = None
-                st.session_state.processed = False
-                st.session_state.embeddings = None
+                clear_processed_results()
                 st.session_state.uploaded_file_id = file_id
 
             # Use the dataframe from session state
@@ -1363,9 +1380,11 @@ if st.session_state.modality == "Text (CSV)":
                 
                     step_start = time.time()
                     st.session_state.df = df_clean
+                    st.session_state.processed_df = df_clean
+                    st.session_state.current_results_modality = 'text'
                     st.session_state.processed = True
                     st.session_state.text_column = text_column
-                
+
                     # Store processing info
                     total_time = time.time() - start_time
                     st.session_state.processing_info = {
@@ -1462,8 +1481,7 @@ elif st.session_state.modality == "Images":
                 if records:
                     st.session_state.image_records = records
                     st.session_state.image_source_id = source_id
-                    st.session_state.processed = False
-                    st.session_state.embeddings = None
+                    clear_processed_results()
                     st.sidebar.success(f"✅ Loaded {len(records)} images")
     elif image_source == "Upload Folder (ZIP)":
         uploaded_zip = st.sidebar.file_uploader(
@@ -1495,8 +1513,7 @@ elif st.session_state.modality == "Images":
                 if records:
                     st.session_state.image_records = records
                     st.session_state.image_source_id = source_id
-                    st.session_state.processed = False
-                    st.session_state.embeddings = None
+                    clear_processed_results()
                     st.sidebar.success(f"✅ Loaded {len(records)} images from archive")
     else:
         url_csv = st.sidebar.file_uploader(
@@ -1570,12 +1587,12 @@ elif st.session_state.modality == "Images":
                         meta_signature = (url_csv.name, url_csv.size, url_column, label_column_choice, link_column_choice, caption_column_choice, limit)
                         st.session_state.image_records = records
                         st.session_state.image_source_id = meta_signature
-                        st.session_state.processed = False
-                        st.session_state.embeddings = None
+                        clear_processed_results()
                         st.sidebar.success(f"✅ Prepared {len(records)} image references")
             except Exception as csv_error:
                 st.sidebar.error(f"Failed to parse CSV: {csv_error}")
                 st.session_state.image_records = []
+                clear_processed_results()
 
     image_records = st.session_state.image_records
 
@@ -1879,6 +1896,8 @@ elif st.session_state.modality == "Images":
                 st.session_state.df = df_clean
                 st.session_state.embeddings = embeddings
                 st.session_state.processed = True
+                st.session_state.processed_df = df_clean
+                st.session_state.current_results_modality = 'image'
                 st.session_state.text_column = 'caption'
                 st.session_state.processing_info = {
                     'total_time': total_time,
@@ -1912,8 +1931,14 @@ elif st.session_state.modality == "Images":
         st.info("👆 Upload images or provide a CSV with image URLs to get started!")
 
 # Main content area
-if st.session_state.processed and st.session_state.df is not None:
-    df = st.session_state.df
+results_df = st.session_state.df
+if results_df is None:
+    results_df = st.session_state.get('processed_df')
+    if results_df is not None:
+        st.session_state.df = results_df
+
+if st.session_state.processed and results_df is not None:
+    df = results_df
     
     # Debug: Show what columns we have
     # st.write("DEBUG - Columns in df:", list(df.columns))
@@ -1926,8 +1951,8 @@ if st.session_state.processed and st.session_state.df is not None:
         st.error(f"❌ Processing incomplete. Missing columns: {', '.join(missing_columns)}")
         st.error(f"Current columns: {', '.join(list(df.columns))}")
         st.info("💡 Please click the '🚀 Process Data' button in the sidebar to create embeddings and prepare the visualization.")
-        # Reset the processed flag since data isn't actually processed
-        st.session_state.processed = False
+        # Reset stored results since data isn't actually processed
+        clear_processed_results()
         st.stop()
     
     # Create tabs
