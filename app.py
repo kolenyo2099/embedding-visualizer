@@ -437,12 +437,16 @@ def encode_images_with_siglip(records, model, processor, device, batch_size=8):
         if not pil_images:
             continue
 
-        inputs = processor(images=pil_images, return_tensors='pt')
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        processed = processor(images=pil_images, return_tensors='pt')
+        pixel_values = processed.get('pixel_values')
+
+        if pixel_values is None:
+            continue
+
+        pixel_values = pixel_values.to(device)
 
         with torch.no_grad():
-            outputs = model(**inputs)
-            image_embeds = outputs.image_embeds
+            image_embeds = model.get_image_features(pixel_values=pixel_values)
             image_embeds = torch.nn.functional.normalize(image_embeds, p=2, dim=-1)
 
         embeddings.append(image_embeds.cpu().numpy())
