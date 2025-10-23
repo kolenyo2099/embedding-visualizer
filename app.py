@@ -376,6 +376,27 @@ def create_thumbnail_base64(image, max_size=(160, 160)):
     return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 
+def _clean_metadata_value(value, default="", allow_empty=True):
+    """Normalize text-like metadata values while treating NaNs as missing."""
+    if value is None:
+        return default
+
+    if isinstance(value, str):
+        candidate = value.strip()
+    else:
+        try:
+            if pd.isna(value):
+                return default
+        except TypeError:
+            pass
+        candidate = str(value).strip()
+
+    if not candidate and not allow_empty:
+        return default
+
+    return candidate if allow_empty or candidate else default
+
+
 @st.cache_resource(show_spinner=False)
 def load_siglip_model(model_name="google/siglip-base-patch16-512", device="cpu", token=None):
     processor_kwargs = {'trust_remote_code': True}
@@ -1487,18 +1508,33 @@ elif st.session_state.modality == "Images":
 
                     records = []
                     for idx, row in url_df.head(limit).iterrows():
-                        url = row[url_column]
-                        if pd.isna(url):
+                        url_value = row.get(url_column)
+                        url = _clean_metadata_value(url_value, default="", allow_empty=False)
+                        if not url:
                             continue
-                        label = str(row[label_column_choice]) if label_column_choice else f"Image {idx}"
-                        link = row[link_column_choice] if link_column_choice else '#'
-                        caption = str(row[caption_column_choice]) if caption_column_choice else ''
+
+                        default_label = f"Image {idx + 1}"
+                        if label_column_choice:
+                            label = _clean_metadata_value(row.get(label_column_choice), default=default_label, allow_empty=False)
+                        else:
+                            label = default_label
+
+                        if caption_column_choice:
+                            caption = _clean_metadata_value(row.get(caption_column_choice), default="", allow_empty=True)
+                        else:
+                            caption = ""
+
+                        if link_column_choice:
+                            link_value = _clean_metadata_value(row.get(link_column_choice), default="#", allow_empty=False)
+                        else:
+                            link_value = "#"
+
                         records.append(create_image_record(
                             identifier=f"row_{idx}",
                             label=label,
-                            link=str(link) if link and not pd.isna(link) else '#',
+                            link=link_value or '#',
                             caption=caption,
-                            url=str(url)
+                            url=url
                         ))
 
                     if records:
@@ -1534,9 +1570,9 @@ elif st.session_state.modality == "Images":
         if not edited_df.empty:
             updated_records = []
             for record, row in zip(image_records, edited_df.to_dict('records')):
-                record['label'] = row['Label'] or record['label']
-                record['caption'] = row['Caption'] or ''
-                record['link'] = row['Link'] or '#'
+                record['label'] = _clean_metadata_value(row.get('Label'), default=record['label'], allow_empty=False)
+                record['caption'] = _clean_metadata_value(row.get('Caption'), default="", allow_empty=True)
+                record['link'] = _clean_metadata_value(row.get('Link'), default="#", allow_empty=False) or '#'
                 updated_records.append(record)
             st.session_state.image_records = updated_records
             image_records = updated_records
@@ -1780,7 +1816,11 @@ elif st.session_state.modality == "Images":
                     except Exception:
                         thumb_b64 = ''
                     thumbnails.append(thumb_b64)
-                    captions.append(record.get('caption') or record.get('label'))
+
+                    caption_text = _clean_metadata_value(record.get('caption'), default="", allow_empty=True)
+                    if not caption_text:
+                        caption_text = _clean_metadata_value(record.get('label'), default=record.get('id', ''), allow_empty=False)
+                    captions.append(caption_text)
 
                 df_clean = pd.DataFrame({
                     'label': [rec['label'] for rec in valid_records],
@@ -1824,6 +1864,8 @@ elif st.session_state.modality == "Images":
                         'modality': 'image'
                     }
                 }
+                st.session_state.search_results = []
+                st.session_state.search_scores = []
                 st.session_state.image_metadata = {
                     'source': image_source,
                     'images': len(df_clean)
@@ -2129,83 +2171,13 @@ if st.session_state.processed and st.session_state.df is not None:
             st.error("❌ Streamlit components not available. Please install streamlit-components:")
             st.code("pip install streamlit-components")
         else:
-            # Save data to a temporary JSON file
-            import tempfile
-            import os
-            
-            # Create temp file for data
-            temp_dir = tempfile.gettempdir()
-            data_file = os.path.join(temp_dir, 'cosmograph_data.json')
-            
-            # Prepare data for JSON export
-            text_col = st.session_state.get('text_column', 'hover_text')
-            if text_col in df.columns:
-                data_for_js = df[['label', 'x', 'y', 'cluster_label', 'hover_text', text_col, 'link']].copy()
-                data_for_js.columns = ['id', 'x', 'y', 'cluster', 'hover_text', 'full_text', 'link']
-            else:
-                data_for_js = df[['label', 'x', 'y', 'cluster_label', 'hover_text', 'link']].copy()
-                data_for_js = data_for_js.rename(columns={
-                    'label': 'id',
-                    'cluster_label': 'cluster',
-                    'hover_text': 'hover_text'
-                })
-                data_for_js['full_text'] = data_for_js['hover_text']
-            
-            # Add search results
-            data_list = data_for_js.to_dict('records')
-            search_results = st.session_state.get('search_results', [])
-            search_scores = st.session_state.get('search_scores', [])
-            
-            for i, row in enumerate(data_list):
-                # Clean data
-                for key, value in row.items():
-                    if pd.isna(value):
-                        row[key] = ""
-                    elif isinstance(value, (np.integer, np.floating)):
-                        if np.isnan(value) or np.isinf(value):
-                            row[key] = 0.0
-                        else:
-                            row[key] = float(value)
-                
-                # Add search info
-                if i in search_results:
-                    idx = search_results.index(i)
-                    row['is_search_result'] = True
-                    row['search_rank'] = idx + 1
-                    row['search_score'] = float(search_scores[idx]) if search_scores and idx < len(search_scores) else 0.0
-                else:
-                    row['is_search_result'] = False
-            
-            # Generate colors
-            unique_clusters = sorted(df['cluster_label'].unique())
-            color_palette = [
-                '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
-                '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe',
-                '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000',
-                '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080'
-            ]
-            cluster_colors = {cluster: color_palette[i % len(color_palette)] 
-                            for i, cluster in enumerate(unique_clusters)}
-            
-            # Base64 encode the JSON to avoid ALL escaping issues
-            import base64
-            json_str = json.dumps({'data': data_list, 'colors': cluster_colors}, ensure_ascii=True)
-            json_b64 = base64.b64encode(json_str.encode('utf-8')).decode('ascii')
-            
-            # Get visualization settings from session state (use defaults if not available)
-            node_size = st.session_state.get('node_size', 1.0)
-            search_result_size_multiplier = st.session_state.get('search_result_size_multiplier', 3.0)
-            
-            # Generate HTML with dynamic node sizes using the function
             html_content = generate_cosmograph_html(
-                df, 
-                search_results, 
-                search_scores, 
-                node_size=node_size, 
+                df,
+                st.session_state.get('search_results', []),
+                st.session_state.get('search_scores', []),
+                node_size=node_size,
                 search_result_size_multiplier=search_result_size_multiplier
             )
-            
-            # Display using components
             components.html(html_content, height=800, scrolling=False)
     
     with tab3:
