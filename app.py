@@ -1008,20 +1008,21 @@ def render_modality_selector(state: AppState) -> None:
 def handle_text_upload(state: AppState) -> None:
     uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=["csv"], key="text_csv_uploader")
     if uploaded_file is None:
-        return
-    file_bytes = uploaded_file.getvalue()
-    file_hash = hashlib.md5(file_bytes).hexdigest()
-    if state.uploaded_file_hash == file_hash:
-        return
-    try:
-        df = pd.read_csv(BytesIO(file_bytes))
-    except Exception as exc:
-        st.sidebar.error(f"Failed to parse CSV: {exc}")
-        return
-    state.raw_df = df
-    state.uploaded_file_hash = file_hash
-    reset_processed_state(state, clear_model=False)
-    st.sidebar.success(f"✅ Loaded dataset with {len(df)} rows")
+        if state.raw_df is None:
+            return
+    else:
+        file_bytes = uploaded_file.getvalue()
+        file_hash = hashlib.md5(file_bytes).hexdigest()
+        if state.uploaded_file_hash != file_hash:
+            try:
+                df = pd.read_csv(BytesIO(file_bytes))
+                state.raw_df = df
+                state.uploaded_file_hash = file_hash
+                reset_processed_state(state, clear_model=False)
+                st.sidebar.success(f"✅ Loaded dataset with {len(df)} rows")
+            except Exception as exc:
+                st.sidebar.error(f"Failed to parse CSV: {exc}")
+                return
 
 
 def text_processing_sidebar(state: AppState, saved_embeddings: List[Dict[str, Any]]):
@@ -1717,39 +1718,6 @@ def process_text_data(state: AppState, config: TextProcessingConfig) -> None:
 
         st.sidebar.success("✅ Processing complete!")
 
-        st.markdown("### 📊 Processing Summary")
-        summary_col1, summary_col2, summary_col3 = st.columns(3)
-        total_time = state.processing_info.get("total_time", 0.0)
-        with summary_col1:
-            st.metric("Total Time", format_time(total_time))
-            st.metric("Data Points", len(df_clean))
-        with summary_col2:
-            st.metric("Clusters Found", state.processing_info["data_stats"]["clusters"])
-            st.metric("Noise Points", state.processing_info["data_stats"]["noise_points"])
-        with summary_col3:
-            st.metric("Embedding Dim", f"{embeddings.shape[1]}D")
-            st.metric("Processing Speed", f"{len(df_clean) / max(total_time, 1e-6):.1f} items/sec")
-
-        with st.expander("⏱️ Detailed Timing Breakdown"):
-            timing_df = pd.DataFrame(processing_steps)
-            if not timing_df.empty:
-                timing_df["percentage"] = (
-                    timing_df["time"] / timing_df["time"].sum() * 100
-                ).round(1)
-                timing_df["Time (formatted)"] = timing_df["time"].apply(format_time)
-                st.dataframe(
-                    timing_df[["step", "Time (formatted)", "percentage", "details"]]
-                    .rename(
-                        columns={
-                            "step": "Step",
-                            "percentage": "Percentage",
-                            "details": "Details",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
     processing_placeholder.empty()
 
 def process_image_data(state: AppState, config: ImageProcessingConfig) -> None:
@@ -2005,38 +1973,6 @@ def process_image_data(state: AppState, config: ImageProcessingConfig) -> None:
         status_text.text("✅ Processing complete!")
         details_text.text(f"Processed {len(df_clean)} images in {format_time(total_time)}")
         st.sidebar.success("✅ Processing complete!")
-
-        st.markdown("### 📊 Processing Summary")
-        summary_col1, summary_col2, summary_col3 = st.columns(3)
-        with summary_col1:
-            st.metric("Total Time", format_time(total_time))
-            st.metric("Images", len(df_clean))
-        with summary_col2:
-            st.metric("Clusters", n_clusters_found)
-            st.metric("Noise Images", noise_points)
-        with summary_col3:
-            st.metric("Embedding Dim", f"{embeddings.shape[1]}D")
-            st.metric("Processing Speed", f"{len(df_clean) / max(total_time, 1e-6):.1f} img/sec")
-
-        with st.expander("⏱️ Detailed Timing Breakdown"):
-            timing_df = pd.DataFrame(processing_steps)
-            if not timing_df.empty:
-                timing_df["percentage"] = (
-                    timing_df["time"] / timing_df["time"].sum() * 100
-                ).round(1)
-                timing_df["Time (formatted)"] = timing_df["time"].apply(format_time)
-                st.dataframe(
-                    timing_df[["step", "Time (formatted)", "percentage", "details"]]
-                    .rename(
-                        columns={
-                            "step": "Step",
-                            "percentage": "Percentage",
-                            "details": "Details",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
 
     processing_placeholder.empty()
 
@@ -2389,6 +2325,58 @@ def render_data_explorer(state: AppState) -> None:
         )
 
 
+def render_summary(state: AppState) -> None:
+    st.markdown("### 📊 Processing Summary")
+
+    processing_info = state.processing_info
+    data_stats = processing_info.get("data_stats", {})
+    total_time = processing_info.get("total_time", 0.0)
+
+    summary_col1, summary_col2, summary_col3 = st.columns(3)
+
+    if data_stats.get("modality") == "image":
+        with summary_col1:
+            st.metric("Total Time", format_time(total_time))
+            st.metric("Images", data_stats.get("total_points", 0))
+        with summary_col2:
+            st.metric("Clusters", data_stats.get("clusters", 0))
+            st.metric("Noise Images", data_stats.get("noise_points", 0))
+        with summary_col3:
+            st.metric("Embedding Dim", f"{data_stats.get('embedding_dim', 0)}D")
+            st.metric("Processing Speed", f"{data_stats.get('total_points', 0) / max(total_time, 1e-6):.1f} img/sec")
+    else:
+        with summary_col1:
+            st.metric("Total Time", format_time(total_time))
+            st.metric("Data Points", data_stats.get("total_points", 0))
+        with summary_col2:
+            st.metric("Clusters Found", data_stats.get("clusters", 0))
+            st.metric("Noise Points", data_stats.get("noise_points", 0))
+        with summary_col3:
+            st.metric("Embedding Dim", f"{data_stats.get('embedding_dim', 0)}D")
+            st.metric("Processing Speed", f"{data_stats.get('total_points', 0) / max(total_time, 1e-6):.1f} items/sec")
+
+    with st.expander("⏱️ Detailed Timing Breakdown"):
+        processing_steps = processing_info.get("steps", [])
+        timing_df = pd.DataFrame(processing_steps)
+        if not timing_df.empty:
+            timing_df["percentage"] = (
+                timing_df["time"] / timing_df["time"].sum() * 100
+            ).round(1)
+            timing_df["Time (formatted)"] = timing_df["time"].apply(format_time)
+            st.dataframe(
+                timing_df[["step", "Time (formatted)", "percentage", "details"]]
+                .rename(
+                    columns={
+                        "step": "Step",
+                        "percentage": "Percentage",
+                        "details": "Details",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
 def render_welcome(state: AppState) -> None:
     st.info("👆 Upload data in the sidebar to get started!")
     with st.expander("ℹ️ How to use this app"):
@@ -2416,6 +2404,8 @@ def render_main_content(state: AppState) -> None:
     if not state.processed or result.df is None:
         render_welcome(state)
         return
+
+    render_summary(state)
 
     df = result.df
     required_columns = ["label", "x", "y", "cluster_label", "hover_text", "link"]
