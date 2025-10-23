@@ -174,6 +174,8 @@ if 'processed' not in st.session_state:
     st.session_state.processed = False
 if 'df' not in st.session_state:
     st.session_state.df = None
+if 'raw_df' not in st.session_state:
+    st.session_state.raw_df = None
 if 'embeddings' not in st.session_state:
     st.session_state.embeddings = None
 if 'model' not in st.session_state:
@@ -902,6 +904,7 @@ if selected_modality != st.session_state.modality:
         st.session_state.image_source_id = None
     else:
         st.session_state.df = None
+        st.session_state.raw_df = None
         st.session_state.uploaded_file_id = None
 
 # Hugging Face Token Input
@@ -957,13 +960,14 @@ if st.session_state.modality == "Text (CSV)":
             # Only reload if it's a different file
             if st.session_state.uploaded_file_id != file_id:
                 df = pd.read_csv(uploaded_file)
-                st.session_state.df = df
+                st.session_state.raw_df = df
+                st.session_state.df = None
                 st.session_state.processed = False
                 st.session_state.embeddings = None
                 st.session_state.uploaded_file_id = file_id
-        
+
             # Use the dataframe from session state
-            df = st.session_state.df
+            df = st.session_state.raw_df
         
             st.sidebar.success(f"✅ Loaded {len(df)} rows")
         
