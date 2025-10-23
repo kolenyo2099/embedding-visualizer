@@ -1,0 +1,203 @@
+body {
+    margin: 0;
+    background: #0f172a;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: white;
+}
+#graph-container {
+    width: 100%;
+    height: 680px;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    background: radial-gradient(circle at top, rgba(148, 163, 184, 0.15), rgba(15, 23, 42, 0.95));
+    position: relative;
+}
+.legend {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    background: rgba(15, 23, 42, 0.85);
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    backdrop-filter: blur(12px);
+    max-height: 320px;
+    overflow-y: auto;
+    width: 220px;
+}
+.legend-title {
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: rgba(226, 232, 240, 0.75);
+    margin-bottom: 12px;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: rgba(226, 232, 240, 0.9);
+}
+.legend-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 10px;
+    flex-shrink: 0;
+    border: 1px solid rgba(148, 163, 184, 0.4);
+}
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(8px);
+}
+.modal-content {
+    background-color: #111827;
+    margin: 4% auto;
+    padding: 0;
+    border-radius: 16px;
+    width: min(720px, 90%);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    box-shadow: 0 30px 60px rgba(15, 23, 42, 0.45);
+    color: #e2e8f0;
+    overflow: hidden;
+}
+.modal-header {
+    padding: 20px 28px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: linear-gradient(120deg, rgba(56, 189, 248, 0.08), rgba(147, 51, 234, 0.12));
+    border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+.modal-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+.close {
+    color: rgba(226, 232, 240, 0.6);
+    font-size: 28px;
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+.close:hover {
+    color: #f8fafc;
+    background: rgba(59, 130, 246, 0.1);
+}
+.modal-media {
+    padding: 24px 28px 12px;
+}
+.modal-media img {
+    width: 100%;
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+}
+.modal-text {
+    padding: 0 28px 24px;
+    line-height: 1.7;
+    color: rgba(226, 232, 240, 0.88);
+}
+.modal-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 28px 24px;
+    border-top: 1px solid rgba(148, 163, 184, 0.15);
+    background: rgba(15, 23, 42, 0.65);
+}
+.modal-link {
+    color: #38bdf8;
+    text-decoration: none;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s ease;
+}
+.modal-link:hover {
+    color: #0ea5e9;
+    transform: translateX(3px);
+}
+.cluster-badge {
+    background: rgba(59, 130, 246, 0.18);
+    color: rgba(191, 219, 254, 0.95);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    margin-right: 8px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.search-badge {
+    background: rgba(244, 114, 182, 0.15);
+    color: rgba(251, 191, 36, 0.95);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.search-controls {
+    position: absolute;
+    top: 24px;
+    left: 24px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    background: rgba(15, 23, 42, 0.9);
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    backdrop-filter: blur(12px);
+}
+.search-input {
+    background: transparent;
+    border: none;
+    color: rgba(226, 232, 240, 0.95);
+    font-size: 13px;
+    outline: none;
+    width: 200px;
+}
+.search-button {
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    padding: 8px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.02em;
+    box-shadow: 0 10px 25px rgba(59, 130, 246, 0.35);
+    transition: all 0.2s ease;
+}
+.search-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 16px 32px rgba(59, 130, 246, 0.45);
+}
+.search-info {
+    position: absolute;
+    bottom: 24px;
+    left: 24px;
+    background: rgba(15, 23, 42, 0.85);
+    padding: 10px 16px;
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    color: rgba(226, 232, 240, 0.85);
+    font-size: 13px;
+    backdrop-filter: blur(12px);
+}
