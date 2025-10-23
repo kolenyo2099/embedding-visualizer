@@ -5,7 +5,7 @@ import os
 import hashlib
 import pickle
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from io import BytesIO
 import base64
 from pathlib import Path
@@ -180,30 +180,56 @@ class SearchState:
     similarity_range: str = ""
 
 
-@dataclass
 class AppState:
-    modality: str = "Text (CSV)"
-    processed: bool = False
-    raw_df: Optional[pd.DataFrame] = None
-    uploaded_file_hash: Optional[str] = None
-    result: ProcessingResult = field(default_factory=ProcessingResult)
-    model: Any = None
-    processing_info: Dict[str, Any] = field(default_factory=dict)
-    hf_token: str = ""
-    node_size: float = 1.0
-    search_result_size_multiplier: float = 3.0
-    search_state: SearchState = field(default_factory=SearchState)
-    image_records: List[Dict[str, Any]] = field(default_factory=list)
-    image_metadata: Dict[str, Any] = field(default_factory=dict)
-    image_source_id: Any = None
-    text_cache_choice: Optional[int] = None
-    image_cache_choice: Optional[int] = None
+    """Proxy object that keeps application state inside Streamlit's session store."""
+
+    DEFAULTS: Dict[str, Any] = {
+        "modality": "Text (CSV)",
+        "processed": False,
+        "raw_df": None,
+        "uploaded_file_hash": None,
+        "result": lambda: ProcessingResult(),
+        "model": None,
+        "processing_info": lambda: {},
+        "hf_token": "",
+        "node_size": 1.0,
+        "search_result_size_multiplier": 3.0,
+        "search_state": lambda: SearchState(),
+        "image_records": lambda: [],
+        "image_metadata": lambda: {},
+        "image_source_id": None,
+        "text_cache_choice": None,
+        "image_cache_choice": None,
+    }
+
+    __slots__ = ("_state",)
+
+    def __init__(self, backing_state: Dict[str, Any]):
+        object.__setattr__(self, "_state", backing_state)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._state[name]
+        except KeyError as exc:  # pragma: no cover - passthrough for attribute access
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._state[name] = value
+
+    def ensure_defaults(self) -> None:
+        for key, default in self.DEFAULTS.items():
+            if key not in self._state:
+                self._state[key] = default() if callable(default) else default
+
+
+APP_STATE_KEY = "__app_state__"
 
 
 def get_app_state() -> AppState:
-    if "__app_state__" not in st.session_state:
-        st.session_state["__app_state__"] = AppState()
-    return st.session_state["__app_state__"]
+    backing_state = st.session_state.setdefault(APP_STATE_KEY, {})
+    state = AppState(backing_state)
+    state.ensure_defaults()
+    return state
 
 
 def reset_processed_state(state: AppState, *, clear_model: bool = False) -> None:
